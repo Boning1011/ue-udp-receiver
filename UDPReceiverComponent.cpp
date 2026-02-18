@@ -135,6 +135,21 @@ void UUDPReceiverComponent::OnDataReceivedCallback(const FArrayReaderPtr& Data, 
 		ParsedData.Points.Add(P);
 	}
 
+	// Log a preview of the received packet for quick debugging
+	{
+		FString Preview;
+		const int32 PreviewCount = FMath::Min(ParsedData.Points.Num(), 3);
+		for (int32 i = 0; i < PreviewCount; ++i)
+		{
+			const FVector4& P = ParsedData.Points[i];
+			Preview += FString::Printf(TEXT("[%.2f, %.2f, %.2f, %.2f] "), P.X, P.Y, P.Z, P.W);
+		}
+		UE_LOG(LogUDPReceiver, Log,
+			TEXT("Received from %s | type=%s | count=%d | first %d point(s): %s"),
+			*Endpoint.ToString(), *ParsedData.Type, ParsedData.Count,
+			PreviewCount, Preview.IsEmpty() ? TEXT("(none)") : *Preview);
+	}
+
 	// Dispatch to game thread — Blueprint delegates must not be called from background threads
 	TWeakObjectPtr<UUDPReceiverComponent> WeakThis(this);
 	AsyncTask(ENamedThreads::GameThread, [WeakThis, CapturedData = MoveTemp(ParsedData)]() mutable
