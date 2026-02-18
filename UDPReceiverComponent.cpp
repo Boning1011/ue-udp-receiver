@@ -157,6 +157,14 @@ void UUDPReceiverComponent::OnDataReceivedCallback(const FArrayReaderPtr& Data, 
 		if (UUDPReceiverComponent* Comp = WeakThis.Get())
 		{
 			Comp->OnEmbeddingReceived.Broadcast(CapturedData);
+
+			TArray<FVector> XYZPoints;
+			XYZPoints.Reserve(CapturedData.Points.Num());
+			for (const FVector4& P : CapturedData.Points)
+			{
+				XYZPoints.Add(FVector(P.X, P.Y, P.Z));
+			}
+			Comp->OnPointsReceived.Broadcast(CapturedData.Type, XYZPoints);
 		}
 	});
 }

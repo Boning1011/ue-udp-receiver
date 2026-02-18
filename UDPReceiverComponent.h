@@ -24,6 +24,7 @@ struct FEmbeddingData
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEmbeddingReceived, const FEmbeddingData&, EmbeddingData);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPointsReceived, const FString&, Type, const TArray<FVector>&, Points);
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class PCG_LEARN_API UUDPReceiverComponent : public UActorComponent
@@ -43,6 +44,9 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "UDP Receiver")
 	FOnEmbeddingReceived OnEmbeddingReceived;
+
+	UPROPERTY(BlueprintAssignable, Category = "UDP")
+	FOnPointsReceived OnPointsReceived;
 
 	UFUNCTION(BlueprintCallable, Category = "UDP Receiver")
 	void StartListening();
