@@ -1,0 +1,20 @@
+# Ignore PCG_LEARN module files (not UDP-related)
+PCG_LEARN.h
+PCG_LEARN.cpp
+PCG_LEARN.Build.cs
+
+# Ignore Claude memory files
+.claude/
+
+# Ignore Unreal Engine generated/intermediate files
+Intermediate/
+Saved/
+Binaries/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.obj
+*.pdb
+
+# Ignore Visual Studio files
+.vs/
