@@ -136,6 +136,7 @@ void UUDPReceiverComponent::OnDataReceivedCallback(const FArrayReaderPtr& Data, 
 	}
 
 	// Log a preview of the received packet for quick debugging
+	if (bEnableDebugLog)
 	{
 		FString Preview;
 		const int32 PreviewCount = FMath::Min(ParsedData.Points.Num(), 3);

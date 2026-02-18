@@ -42,6 +42,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UDP Receiver")
 	int32 ListenPort = 7000;
 
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UDP Receiver")
+	bool bEnableDebugLog = false;
+
 	UPROPERTY(BlueprintAssignable, Category = "UDP Receiver")
 	FOnEmbeddingReceived OnEmbeddingReceived;
 
