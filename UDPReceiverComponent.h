@@ -7,8 +7,8 @@
 #include "Common/UdpSocketReceiver.h"
 #include "UDPReceiverComponent.generated.h"
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPointCloudReceived, uint32, FrameId, const TArray<FVector4>&, Points);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPointCloudPositionsReceived, uint32, FrameId, const TArray<FVector>&, Positions);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPointCloudReceived, int32, FrameId, const TArray<FVector4>&, Points);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPointCloudPositionsReceived, int32, FrameId, const TArray<FVector>&, Positions);
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class PCG_LEARN_API UUDPReceiverComponent : public UActorComponent

@@ -229,7 +229,7 @@ void UUDPReceiverComponent::FlushFrame(uint32 FrameId, FFrameBuffer& Buffer)
 
 	// Dispatch to game thread
 	TWeakObjectPtr<UUDPReceiverComponent> WeakThis(this);
-	uint32 CapturedFrameId = FrameId;
+	int32 CapturedFrameId = static_cast<int32>(FrameId);
 
 	AsyncTask(ENamedThreads::GameThread, [WeakThis, CapturedFrameId,
 		FullPoints = MoveTemp(Buffer.Points), Pos = MoveTemp(Positions)]()
