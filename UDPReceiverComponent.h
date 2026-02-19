@@ -8,6 +8,7 @@
 #include "UDPReceiverComponent.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPointCloudReceived, uint32, FrameId, const TArray<FVector4>&, Points);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPointCloudPositionsReceived, uint32, FrameId, const TArray<FVector>&, Positions);
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class PCG_LEARN_API UUDPReceiverComponent : public UActorComponent
@@ -32,8 +33,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UDP Receiver")
 	float ChunkTimeoutSeconds = 2.0f;
 
+	/** Full data: FVector4(X, Y, Z, Intensity) per point. */
 	UPROPERTY(BlueprintAssignable, Category = "UDP Receiver")
 	FOnPointCloudReceived OnPointCloudReceived;
+
+	/** Positions only: FVector(X, Y, Z) — connects directly to Niagara. */
+	UPROPERTY(BlueprintAssignable, Category = "UDP Receiver")
+	FOnPointCloudPositionsReceived OnPointCloudPositionsReceived;
 
 	UFUNCTION(BlueprintCallable, Category = "UDP Receiver")
 	void StartListening();

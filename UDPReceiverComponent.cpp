@@ -219,16 +219,25 @@ void UUDPReceiverComponent::FlushFrame(uint32 FrameId, FFrameBuffer& Buffer)
 			FrameId, Buffer.Points.Num(), PreviewCount, *Preview);
 	}
 
+	// Build FVector positions array for Niagara-friendly delegate
+	TArray<FVector> Positions;
+	Positions.Reserve(Buffer.Points.Num());
+	for (const FVector4& P : Buffer.Points)
+	{
+		Positions.Add(FVector(P.X, P.Y, P.Z));
+	}
+
 	// Dispatch to game thread
 	TWeakObjectPtr<UUDPReceiverComponent> WeakThis(this);
-	TArray<FVector4> CapturedPoints = MoveTemp(Buffer.Points);
 	uint32 CapturedFrameId = FrameId;
 
-	AsyncTask(ENamedThreads::GameThread, [WeakThis, CapturedFrameId, Points = MoveTemp(CapturedPoints)]()
+	AsyncTask(ENamedThreads::GameThread, [WeakThis, CapturedFrameId,
+		FullPoints = MoveTemp(Buffer.Points), Pos = MoveTemp(Positions)]()
 	{
 		if (UUDPReceiverComponent* Comp = WeakThis.Get())
 		{
-			Comp->OnPointCloudReceived.Broadcast(CapturedFrameId, Points);
+			Comp->OnPointCloudReceived.Broadcast(CapturedFrameId, FullPoints);
+			Comp->OnPointCloudPositionsReceived.Broadcast(CapturedFrameId, Pos);
 		}
 	});
 }
