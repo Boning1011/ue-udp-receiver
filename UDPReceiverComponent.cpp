@@ -8,14 +8,23 @@
 #include "SocketSubsystem.h"
 #include "Interfaces/IPv4/IPv4Endpoint.h"
 
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
-#include "Dom/JsonObject.h"
-#include "Dom/JsonValue.h"
-
 #include "Async/Async.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogUDPReceiver, Log, All);
+
+// ── Binary protocol constants ───────────────────────────────────────────────
+static constexpr int32 HEADER_SIZE      = 16;
+static constexpr int32 BYTES_PER_POINT  = 16;  // 4 × float32
+
+// Header offsets (little-endian)
+//  0: uint8  msg_type
+//  1: uint8  flags
+//  2: uint32 frame_id
+//  6: uint16 chunk_index
+//  8: uint16 total_chunks
+// 10: uint16 points_in_chunk
+// 12: uint32 total_points
+// ─────────────────────────────────────────────────────────────────────────────
 
 UUDPReceiverComponent::UUDPReceiverComponent()
 {
@@ -78,6 +87,9 @@ void UUDPReceiverComponent::StopListening()
 		UdpSocket = nullptr;
 	}
 
+	FScopeLock Lock(&FrameLock);
+	PendingFrames.Empty();
+
 	UE_LOG(LogUDPReceiver, Log, TEXT("UDP listener stopped."));
 }
 
@@ -88,84 +100,157 @@ bool UUDPReceiverComponent::IsListening() const
 
 void UUDPReceiverComponent::OnDataReceivedCallback(const FArrayReaderPtr& Data, const FIPv4Endpoint& Endpoint)
 {
-	// Convert raw bytes to FString (expected UTF-8 JSON)
-	TArray<uint8> NullTerminated;
-	NullTerminated.Append(Data->GetData(), Data->Num());
-	NullTerminated.Add(0);
+	const int32 DataSize = Data->Num();
 
-	const FString JsonString = FString(UTF8_TO_TCHAR(reinterpret_cast<const char*>(NullTerminated.GetData())));
-
-	// Parse JSON
-	TSharedPtr<FJsonObject> Root;
-	const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonString);
-	if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
+	// Minimum: header only (no points is acceptable for total_chunks bookkeeping)
+	if (DataSize < HEADER_SIZE)
 	{
-		UE_LOG(LogUDPReceiver, Warning, TEXT("Failed to parse JSON from %s."), *Endpoint.ToString());
+		UE_LOG(LogUDPReceiver, Warning, TEXT("Packet too small (%d bytes) from %s, ignoring."), DataSize, *Endpoint.ToString());
 		return;
 	}
 
-	// Extract fields
-	FEmbeddingData ParsedData;
-	Root->TryGetStringField(TEXT("type"), ParsedData.Type);
+	const uint8* Raw = Data->GetData();
 
-	double CountAsDouble = 0.0;
-	Root->TryGetNumberField(TEXT("count"), CountAsDouble);
-	ParsedData.Count = static_cast<int32>(CountAsDouble);
+	// ── Parse header (little-endian, matching Python struct "<2BI3HI") ──────
+	const uint8  MsgType        = Raw[0];
+	// const uint8  Flags        = Raw[1];  // reserved
+	uint32 FrameId;
+	FMemory::Memcpy(&FrameId, Raw + 2, 4);
 
-	const TArray<TSharedPtr<FJsonValue>>* PointsArray = nullptr;
-	if (!Root->TryGetArrayField(TEXT("points"), PointsArray) || PointsArray == nullptr)
+	uint16 ChunkIndex;
+	FMemory::Memcpy(&ChunkIndex, Raw + 6, 2);
+
+	uint16 TotalChunks;
+	FMemory::Memcpy(&TotalChunks, Raw + 8, 2);
+
+	uint16 PointsInChunk;
+	FMemory::Memcpy(&PointsInChunk, Raw + 10, 2);
+
+	uint32 TotalPoints;
+	FMemory::Memcpy(&TotalPoints, Raw + 12, 4);
+
+	// Only handle point-cloud messages
+	if (MsgType != 0)
 	{
-		UE_LOG(LogUDPReceiver, Warning, TEXT("No 'points' array in packet from %s."), *Endpoint.ToString());
+		UE_LOG(LogUDPReceiver, Warning, TEXT("Unknown msg_type %d from %s, ignoring."), MsgType, *Endpoint.ToString());
 		return;
 	}
 
-	ParsedData.Points.Reserve(PointsArray->Num());
-	for (const TSharedPtr<FJsonValue>& Entry : *PointsArray)
+	// Validate payload size
+	const int32 ExpectedPayload = static_cast<int32>(PointsInChunk) * BYTES_PER_POINT;
+	if (DataSize - HEADER_SIZE < ExpectedPayload)
 	{
-		const TArray<TSharedPtr<FJsonValue>>* Comps = nullptr;
-		if (!Entry->TryGetArray(Comps) || Comps == nullptr || Comps->Num() < 4)
-		{
-			continue;
-		}
-		FVector4 P;
-		P.X = (*Comps)[0]->AsNumber();
-		P.Y = (*Comps)[1]->AsNumber();
-		P.Z = (*Comps)[2]->AsNumber();
-		P.W = (*Comps)[3]->AsNumber();
-		ParsedData.Points.Add(P);
+		UE_LOG(LogUDPReceiver, Warning,
+			TEXT("Payload too small: expected %d bytes for %d points, got %d bytes. frame=%u chunk=%u/%u"),
+			ExpectedPayload, PointsInChunk, DataSize - HEADER_SIZE, FrameId, ChunkIndex, TotalChunks);
+		return;
 	}
 
-	// Log a preview of the received packet for quick debugging
+	// ── Parse point payload ─────────────────────────────────────────────────
+	const float* FloatData = reinterpret_cast<const float*>(Raw + HEADER_SIZE);
+	TArray<FVector4> ChunkPoints;
+	ChunkPoints.Reserve(PointsInChunk);
+
+	for (uint16 i = 0; i < PointsInChunk; ++i)
+	{
+		const int32 Base = i * 4;
+		ChunkPoints.Add(FVector4(
+			FloatData[Base + 0],  // x
+			FloatData[Base + 1],  // y
+			FloatData[Base + 2],  // z
+			FloatData[Base + 3]   // intensity
+		));
+	}
+
+	if (bEnableDebugLog)
+	{
+		UE_LOG(LogUDPReceiver, Log,
+			TEXT("Chunk %u/%u  frame=%u  pts_in_chunk=%d  total_pts=%u  from %s"),
+			ChunkIndex + 1, TotalChunks, FrameId, PointsInChunk, TotalPoints, *Endpoint.ToString());
+	}
+
+	// ── Reassemble frame ────────────────────────────────────────────────────
+	FScopeLock Lock(&FrameLock);
+
+	// Purge stale incomplete frames
+	PurgeStaleFrames();
+
+	FFrameBuffer& Frame = PendingFrames.FindOrAdd(FrameId);
+
+	// Initialize on first chunk
+	if (Frame.ReceivedChunks == 0)
+	{
+		Frame.TotalPoints  = TotalPoints;
+		Frame.TotalChunks  = TotalChunks;
+		Frame.FirstChunkTime = FPlatformTime::Seconds();
+		Frame.Points.Reserve(TotalPoints);
+	}
+
+	// Deduplicate (in case of retransmit)
+	if (Frame.ReceivedIndices.Contains(ChunkIndex))
+	{
+		return;
+	}
+	Frame.ReceivedIndices.Add(ChunkIndex);
+	Frame.ReceivedChunks++;
+	Frame.Points.Append(ChunkPoints);
+
+	// All chunks received — flush
+	if (Frame.ReceivedChunks >= Frame.TotalChunks)
+	{
+		FlushFrame(FrameId, Frame);
+		PendingFrames.Remove(FrameId);
+	}
+}
+
+void UUDPReceiverComponent::FlushFrame(uint32 FrameId, FFrameBuffer& Buffer)
+{
 	if (bEnableDebugLog)
 	{
 		FString Preview;
-		const int32 PreviewCount = FMath::Min(ParsedData.Points.Num(), 3);
+		const int32 PreviewCount = FMath::Min(Buffer.Points.Num(), 3);
 		for (int32 i = 0; i < PreviewCount; ++i)
 		{
-			const FVector4& P = ParsedData.Points[i];
+			const FVector4& P = Buffer.Points[i];
 			Preview += FString::Printf(TEXT("[%.2f, %.2f, %.2f, %.2f] "), P.X, P.Y, P.Z, P.W);
 		}
 		UE_LOG(LogUDPReceiver, Log,
-			TEXT("Received from %s | type=%s | count=%d | first %d point(s): %s"),
-			*Endpoint.ToString(), *ParsedData.Type, ParsedData.Count,
-			PreviewCount, Preview.IsEmpty() ? TEXT("(none)") : *Preview);
+			TEXT("Frame %u complete: %d points | first %d: %s"),
+			FrameId, Buffer.Points.Num(), PreviewCount, *Preview);
 	}
 
-	// Dispatch to game thread — Blueprint delegates must not be called from background threads
+	// Dispatch to game thread
 	TWeakObjectPtr<UUDPReceiverComponent> WeakThis(this);
-	AsyncTask(ENamedThreads::GameThread, [WeakThis, CapturedData = MoveTemp(ParsedData)]() mutable
+	TArray<FVector4> CapturedPoints = MoveTemp(Buffer.Points);
+	uint32 CapturedFrameId = FrameId;
+
+	AsyncTask(ENamedThreads::GameThread, [WeakThis, CapturedFrameId, Points = MoveTemp(CapturedPoints)]()
 	{
 		if (UUDPReceiverComponent* Comp = WeakThis.Get())
 		{
-			Comp->OnEmbeddingReceived.Broadcast(CapturedData);
-
-			TArray<FVector> XYZPoints;
-			XYZPoints.Reserve(CapturedData.Points.Num());
-			for (const FVector4& P : CapturedData.Points)
-			{
-				XYZPoints.Add(FVector(P.X, P.Y, P.Z));
-			}
-			Comp->OnPointsReceived.Broadcast(CapturedData.Type, XYZPoints);
+			Comp->OnPointCloudReceived.Broadcast(CapturedFrameId, Points);
 		}
 	});
+}
+
+void UUDPReceiverComponent::PurgeStaleFrames()
+{
+	const double Now = FPlatformTime::Seconds();
+	TArray<uint32> ToRemove;
+
+	for (auto& Pair : PendingFrames)
+	{
+		if (Now - Pair.Value.FirstChunkTime > static_cast<double>(ChunkTimeoutSeconds))
+		{
+			UE_LOG(LogUDPReceiver, Warning,
+				TEXT("Frame %u timed out (%d/%d chunks received). Discarding."),
+				Pair.Key, Pair.Value.ReceivedChunks, Pair.Value.TotalChunks);
+			ToRemove.Add(Pair.Key);
+		}
+	}
+
+	for (uint32 Key : ToRemove)
+	{
+		PendingFrames.Remove(Key);
+	}
 }

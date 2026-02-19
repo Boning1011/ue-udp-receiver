@@ -7,24 +7,7 @@
 #include "Common/UdpSocketReceiver.h"
 #include "UDPReceiverComponent.generated.h"
 
-USTRUCT(BlueprintType)
-struct FEmbeddingData
-{
-	GENERATED_BODY()
-
-	UPROPERTY(BlueprintReadOnly, Category = "UDP Embedding")
-	FString Type;
-
-	UPROPERTY(BlueprintReadOnly, Category = "UDP Embedding")
-	int32 Count = 0;
-
-	// X, Y, Z = position; W = intensity
-	UPROPERTY(BlueprintReadOnly, Category = "UDP Embedding")
-	TArray<FVector4> Points;
-};
-
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEmbeddingReceived, const FEmbeddingData&, EmbeddingData);
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPointsReceived, const FString&, Type, const TArray<FVector>&, Points);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPointCloudReceived, uint32, FrameId, const TArray<FVector4>&, Points);
 
 UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
 class PCG_LEARN_API UUDPReceiverComponent : public UActorComponent
@@ -45,11 +28,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UDP Receiver")
 	bool bEnableDebugLog = false;
 
-	UPROPERTY(BlueprintAssignable, Category = "UDP Receiver")
-	FOnEmbeddingReceived OnEmbeddingReceived;
+	/** Max seconds to wait for all chunks of a frame before discarding. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UDP Receiver")
+	float ChunkTimeoutSeconds = 2.0f;
 
-	UPROPERTY(BlueprintAssignable, Category = "UDP")
-	FOnPointsReceived OnPointsReceived;
+	UPROPERTY(BlueprintAssignable, Category = "UDP Receiver")
+	FOnPointCloudReceived OnPointCloudReceived;
 
 	UFUNCTION(BlueprintCallable, Category = "UDP Receiver")
 	void StartListening();
@@ -64,5 +48,23 @@ private:
 	FSocket* UdpSocket = nullptr;
 	FUdpSocketReceiver* UdpReceiver = nullptr;
 
+	/** Per-frame reassembly buffer. */
+	struct FFrameBuffer
+	{
+		uint32 TotalPoints = 0;
+		uint16 TotalChunks = 0;
+		uint16 ReceivedChunks = 0;
+		double FirstChunkTime = 0.0;
+		TArray<FVector4> Points;
+		TSet<uint16> ReceivedIndices;
+	};
+
+	TMap<uint32, FFrameBuffer> PendingFrames;
+
+	/** Protects PendingFrames (callback runs on receiver thread). */
+	FCriticalSection FrameLock;
+
 	void OnDataReceivedCallback(const FArrayReaderPtr& Data, const FIPv4Endpoint& Endpoint);
+	void FlushFrame(uint32 FrameId, FFrameBuffer& Buffer);
+	void PurgeStaleFrames();
 };
