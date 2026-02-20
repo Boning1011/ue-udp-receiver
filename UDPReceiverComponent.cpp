@@ -205,15 +205,26 @@ void UUDPReceiverComponent::OnDataReceivedCallback(const FArrayReaderPtr& Data, 
 
 void UUDPReceiverComponent::FlushFrame(uint32 FrameId, FFrameBuffer& Buffer)
 {
-	// Drop frames older than what we've already delivered
-	if (bHasDeliveredAny && static_cast<int32>(FrameId - LastDeliveredFrameId) <= 0)
+	// Drop frames older than what we've already delivered.
+	// Safety: if gap is huge (>1000), assume sender restarted or hot-reload
+	// left garbage in LastDeliveredFrameId — reset tracking.
+	if (bHasDeliveredAny)
 	{
-		if (bEnableDebugLog)
+		const int32 Delta = static_cast<int32>(FrameId - LastDeliveredFrameId);
+		if (Delta <= 0 && Delta > -1000)
 		{
-			UE_LOG(LogUDPReceiver, Log,
-				TEXT("Dropping stale frame %u (last delivered: %u)"), FrameId, LastDeliveredFrameId);
+			if (bEnableDebugLog)
+			{
+				UE_LOG(LogUDPReceiver, Log,
+					TEXT("Dropping stale frame %u (last delivered: %u)"), FrameId, LastDeliveredFrameId);
+			}
+			return;
 		}
-		return;
+		if (Delta < -1000 || Delta > 1000)
+		{
+			UE_LOG(LogUDPReceiver, Warning,
+				TEXT("Frame ID jump detected (%u -> %u), resetting tracking."), LastDeliveredFrameId, FrameId);
+		}
 	}
 	LastDeliveredFrameId = FrameId;
 	bHasDeliveredAny = true;
