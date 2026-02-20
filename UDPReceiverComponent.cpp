@@ -55,7 +55,7 @@ void UUDPReceiverComponent::StartListening()
 		.AsNonBlocking()
 		.AsReusable()
 		.BoundToPort(ListenPort)
-		.WithReceiveBufferSize(2 * 1024 * 1024)
+		.WithReceiveBufferSize(16 * 1024 * 1024)
 		.Build();
 
 	if (UdpSocket == nullptr)
@@ -89,6 +89,8 @@ void UUDPReceiverComponent::StopListening()
 
 	FScopeLock Lock(&FrameLock);
 	PendingFrames.Empty();
+	LastDeliveredFrameId = 0;
+	bHasDeliveredAny = false;
 
 	UE_LOG(LogUDPReceiver, Log, TEXT("UDP listener stopped."));
 }
@@ -183,17 +185,15 @@ void UUDPReceiverComponent::OnDataReceivedCallback(const FArrayReaderPtr& Data, 
 		Frame.TotalPoints  = TotalPoints;
 		Frame.TotalChunks  = TotalChunks;
 		Frame.FirstChunkTime = FPlatformTime::Seconds();
-		Frame.Points.Reserve(TotalPoints);
 	}
 
 	// Deduplicate (in case of retransmit)
-	if (Frame.ReceivedIndices.Contains(ChunkIndex))
+	if (Frame.ChunkData.Contains(ChunkIndex))
 	{
 		return;
 	}
-	Frame.ReceivedIndices.Add(ChunkIndex);
+	Frame.ChunkData.Add(ChunkIndex, MoveTemp(ChunkPoints));
 	Frame.ReceivedChunks++;
-	Frame.Points.Append(ChunkPoints);
 
 	// All chunks received — flush
 	if (Frame.ReceivedChunks >= Frame.TotalChunks)
@@ -205,24 +205,48 @@ void UUDPReceiverComponent::OnDataReceivedCallback(const FArrayReaderPtr& Data, 
 
 void UUDPReceiverComponent::FlushFrame(uint32 FrameId, FFrameBuffer& Buffer)
 {
+	// Drop frames older than what we've already delivered
+	if (bHasDeliveredAny && static_cast<int32>(FrameId - LastDeliveredFrameId) <= 0)
+	{
+		if (bEnableDebugLog)
+		{
+			UE_LOG(LogUDPReceiver, Log,
+				TEXT("Dropping stale frame %u (last delivered: %u)"), FrameId, LastDeliveredFrameId);
+		}
+		return;
+	}
+	LastDeliveredFrameId = FrameId;
+	bHasDeliveredAny = true;
+
+	// Reassemble points in chunk_index order
+	TArray<FVector4> OrderedPoints;
+	OrderedPoints.Reserve(Buffer.TotalPoints);
+	for (uint16 i = 0; i < Buffer.TotalChunks; ++i)
+	{
+		if (TArray<FVector4>* Chunk = Buffer.ChunkData.Find(i))
+		{
+			OrderedPoints.Append(MoveTemp(*Chunk));
+		}
+	}
+
 	if (bEnableDebugLog)
 	{
 		FString Preview;
-		const int32 PreviewCount = FMath::Min(Buffer.Points.Num(), 3);
+		const int32 PreviewCount = FMath::Min(OrderedPoints.Num(), 3);
 		for (int32 i = 0; i < PreviewCount; ++i)
 		{
-			const FVector4& P = Buffer.Points[i];
+			const FVector4& P = OrderedPoints[i];
 			Preview += FString::Printf(TEXT("[%.2f, %.2f, %.2f, %.2f] "), P.X, P.Y, P.Z, P.W);
 		}
 		UE_LOG(LogUDPReceiver, Log,
 			TEXT("Frame %u complete: %d points | first %d: %s"),
-			FrameId, Buffer.Points.Num(), PreviewCount, *Preview);
+			FrameId, OrderedPoints.Num(), PreviewCount, *Preview);
 	}
 
 	// Build FVector positions array for Niagara-friendly delegate
 	TArray<FVector> Positions;
-	Positions.Reserve(Buffer.Points.Num());
-	for (const FVector4& P : Buffer.Points)
+	Positions.Reserve(OrderedPoints.Num());
+	for (const FVector4& P : OrderedPoints)
 	{
 		Positions.Add(FVector(P.X, P.Y, P.Z));
 	}
@@ -232,7 +256,7 @@ void UUDPReceiverComponent::FlushFrame(uint32 FrameId, FFrameBuffer& Buffer)
 	int32 CapturedFrameId = static_cast<int32>(FrameId);
 
 	AsyncTask(ENamedThreads::GameThread, [WeakThis, CapturedFrameId,
-		FullPoints = MoveTemp(Buffer.Points), Pos = MoveTemp(Positions)]()
+		FullPoints = MoveTemp(OrderedPoints), Pos = MoveTemp(Positions)]()
 	{
 		if (UUDPReceiverComponent* Comp = WeakThis.Get())
 		{

@@ -31,7 +31,7 @@ public:
 
 	/** Max seconds to wait for all chunks of a frame before discarding. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "UDP Receiver")
-	float ChunkTimeoutSeconds = 2.0f;
+	float ChunkTimeoutSeconds = 0.3f;
 
 	/** Full data: FVector4(X, Y, Z, Intensity) per point. */
 	UPROPERTY(BlueprintAssignable, Category = "UDP Receiver")
@@ -61,14 +61,17 @@ private:
 		uint16 TotalChunks = 0;
 		uint16 ReceivedChunks = 0;
 		double FirstChunkTime = 0.0;
-		TArray<FVector4> Points;
-		TSet<uint16> ReceivedIndices;
+		TMap<uint16, TArray<FVector4>> ChunkData;  // keyed by chunk_index for ordered reassembly
 	};
 
 	TMap<uint32, FFrameBuffer> PendingFrames;
 
 	/** Protects PendingFrames (callback runs on receiver thread). */
 	FCriticalSection FrameLock;
+
+	/** Last frame_id delivered to game thread — skip older frames. */
+	uint32 LastDeliveredFrameId = 0;
+	bool bHasDeliveredAny = false;
 
 	void OnDataReceivedCallback(const FArrayReaderPtr& Data, const FIPv4Endpoint& Endpoint);
 	void FlushFrame(uint32 FrameId, FFrameBuffer& Buffer);
